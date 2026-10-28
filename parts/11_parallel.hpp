@@ -319,7 +319,12 @@ class ThreadPool {
 public:
     /// Number of worker threads, excluding the calling thread.
     static unsigned default_threads() noexcept {
-        unsigned hc = std::thread::hardware_concurrency();
+        unsigned hc = 0;
+        if (const char* e = std::getenv("FYX_THREADS")) {
+            int v = std::atoi(e);
+            if (v > 0) hc = static_cast<unsigned>(v);
+        }
+        if (hc == 0) hc = std::thread::hardware_concurrency();
         if (hc == 0) hc = 1;
         if (hc > kMaxThreads) hc = kMaxThreads;
         return hc;

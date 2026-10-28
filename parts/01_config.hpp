@@ -215,6 +215,9 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#if defined(_WIN32) || defined(_WIN64)
+#  include <malloc.h>
+#endif
 #include <climits>
 #include <cmath>
 #include <limits>
