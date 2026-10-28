@@ -12,3 +12,7 @@ Linux（Kali 4核8G 也按这个来）：
 Windows：MinGW 很难稳定编 highway / TBB / 英特尔向量，包内是
   fyx串行、fyx并行、标准库、模式击败。build.bat 已关 AVX-512（14700K 没有）。
   全算法请用 Linux 包在 Linux 机器上跑。
+
+以后更新（指定分支，默认 arena/01a07a48-fyx-sort）：
+  ./update.sh
+  ./update.sh arena/01a07a48-fyx-sort
