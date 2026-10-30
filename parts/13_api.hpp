@@ -3460,6 +3460,8 @@ inline bool try_proof_structured_sort(T* p, std::size_t n, bool descending,
 template <class T, class Comp>
 inline void merge_runs_moving(T* a, std::size_t n1, T* b, std::size_t n2, T* dst, Comp comp);
 template <class T>
+inline bool try_parallel_radix_chunk_merge(T* p, std::size_t n, bool descending);
+template <class T>
 inline std::size_t radix_key_find_break(const T* p, std::size_t start, std::size_t hi,
                                         typename RadixTraits<T>::Key prev_key,
                                         const bool want_up, const bool descending);
@@ -5724,6 +5726,9 @@ inline bool try_parallel_radix_high_prefix_sort(T* p, std::size_t n, bool descen
         return false;
     } else {
         using Key = typename RadixTraits<T>::Key;
+        if constexpr (sizeof(Key) >= 8) {
+            if (try_parallel_radix_chunk_merge(p, n, descending)) return true;
+        }
         if constexpr (sizeof(Key) != 8 && sizeof(Key) != 4) {
             (void)p; (void)n; (void)descending;
             return false;
@@ -5899,6 +5904,83 @@ inline bool try_parallel_radix32_wide_sort(T* p, std::size_t n, bool descending)
     }
 }
 
+/// 64-bit keys: 8 shared LSD passes fight the last-level cache on a handful of
+/// cores.  Serial radix on disjoint slices stays in cache, then a stable
+/// pairwise merge (encoded order, so NaN/-0 match radix) finishes.  General
+/// for every 8-byte radix type, not a distribution special case.
+template <class T>
+inline bool try_parallel_radix_chunk_merge(T* p, std::size_t n, bool descending) {
+    if constexpr (!radix_supported_v<T> || sizeof(typename RadixTraits<T>::Key) < 8 ||
+                  !std::is_trivially_copyable<T>::value) {
+        (void)p; (void)n; (void)descending;
+        return false;
+    } else {
+        if (n < (std::size_t(1) << 18) || !parallel_available()) return false;
+        ThreadPool& pool = global_pool();
+        unsigned w = pool.nworkers();
+        if (w < 2) return false;
+        if (w > 8) w = 8;
+        if (w == 3) w = 2;
+        else if (w == 5 || w == 6 || w == 7) w = 4;
+
+        ScratchLease<T> buf(n);
+        if (!buf.valid()) return false;
+
+        std::vector<std::size_t> off(w + 1);
+        for (unsigned i = 0; i <= w; ++i) off[i] = (static_cast<std::size_t>(i) * n) / w;
+
+        std::atomic<bool> ok{true};
+        auto sort_job = [&](std::size_t c_lo, std::size_t c_hi) {
+            for (std::size_t c = c_lo; c < c_hi; ++c) {
+                const std::size_t lo = off[c];
+                const std::size_t m  = off[c + 1] - lo;
+                if (m >= 2 && !radix_sort(p + lo, m)) ok.store(false, std::memory_order_relaxed);
+            }
+        };
+        parallel_for_index(std::size_t(0), static_cast<std::size_t>(w), std::size_t(1), sort_job);
+        if (!ok.load(std::memory_order_relaxed)) return false;
+
+        auto rless = [](const T& a, const T& b) noexcept {
+            return RadixTraits<T>::encode(a) < RadixTraits<T>::encode(b);
+        };
+
+        T* src = p;
+        T* dst = buf.get();
+        unsigned runs = w;
+        std::vector<std::size_t> cur = off;
+        while (runs > 1) {
+            const unsigned nr = (runs + 1u) / 2u;
+            auto merge_job = [&](std::size_t r_lo, std::size_t r_hi) {
+                for (std::size_t r = r_lo; r < r_hi; ++r) {
+                    const unsigned i = static_cast<unsigned>(r) * 2u;
+                    const std::size_t left = cur[i];
+                    if (i + 1 >= runs) {
+                        const std::size_t bytes = (cur[runs] - left) * sizeof(T);
+                        if (bytes) std::memcpy(dst + left, src + left, bytes);
+                    } else {
+                        merge_runs_moving(src + left, cur[i + 1] - left,
+                                          src + cur[i + 1], cur[i + 2] - cur[i + 1],
+                                          dst + left, rless);
+                    }
+                }
+            };
+            parallel_for_index(std::size_t(0), static_cast<std::size_t>(nr), std::size_t(1), merge_job);
+            std::vector<std::size_t> nxt(nr + 1);
+            nxt[0] = cur[0];
+            for (unsigned r = 0; r < nr; ++r) {
+                const unsigned i = r * 2u;
+                nxt[r + 1] = (i + 1 >= runs) ? cur[runs] : cur[i + 2];
+            }
+            cur.swap(nxt);
+            std::swap(src, dst);
+            runs = nr;
+        }
+        if (src != p) std::memcpy(p, src, n * sizeof(T));
+        if (descending) std::reverse(p, p + n);
+        return true;
+    }
+}
+
 template <class T>
 inline bool try_parallel_radix_sort(T* p, std::size_t n, bool descending, bool assume_all_passes = false) {
     if constexpr (!radix_supported_v<T>) {
@@ -5908,6 +5990,9 @@ inline bool try_parallel_radix_sort(T* p, std::size_t n, bool descending, bool a
         using RT  = RadixTraits<T>;
         using Key = typename RT::Key;
         constexpr unsigned Passes = RT::passes;
+        if constexpr (sizeof(Key) >= 8) {
+            if (try_parallel_radix_chunk_merge(p, n, descending)) return true;
+        }
         // Chunked parallel radix removes the old sort-halves-and-compare-merge
         // fallback for large high-entropy numeric inputs.
         {
