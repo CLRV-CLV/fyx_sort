@@ -1979,6 +1979,73 @@ inline bool try_integer_range_count_exact(T* p, std::size_t n, bool descending) 
 // money in fixed-point) gets the same dense O(n + range) counter as ints
 // instead of the hash-probed sparse one.
 
+/// Encoded keys in a 256-wide window: one stack histogram, no thread pool,
+/// fill with std::fill_n.  Beats both the hashed sparse counter and a
+/// parallel dense counter when there are only a handful of consecutive
+/// ranks (mod-8 integers, enum-like floats after encode, etc.).
+template <class T>
+inline bool try_tiny_encoded_range_count(T* p, std::size_t n, bool descending,
+                                         const SampleWindow<T>* win = nullptr) {
+    if constexpr (!(radix_supported_v<T> && !std::is_same<T, bool>::value)) {
+        (void)p; (void)n; (void)descending; (void)win;
+        return false;
+    } else {
+        if (n < kCountingMinN) return false;
+        using RT  = RadixTraits<T>;
+        using Key = typename RT::Key;
+        Key smn, smx;
+        if (win && win->valid) {
+            smn = static_cast<Key>(win->lo);
+            smx = static_cast<Key>(win->hi);
+        } else {
+            smn = RT::encode(p[0]);
+            smx = smn;
+            const std::size_t sample_n = std::min<std::size_t>(n, kProfileSampleLimit);
+            for (std::size_t j = 1; j < sample_n; ++j) {
+                const Key k = RT::encode(p[(j * n) / sample_n]);
+                if (k < smn) smn = k;
+                if (smx < k) smx = k;
+            }
+        }
+        const unsigned long long span = static_cast<unsigned long long>(static_cast<Key>(smx - smn)) + 1ull;
+        if (span < 2ull || span > 256ull) return false;
+
+        std::uint32_t cnt[256];
+        std::memset(cnt, 0, sizeof(cnt));
+        const Key lo = smn;
+        std::size_t i = 0;
+        for (; i + 4 <= n; i += 4) {
+            const std::size_t d0 = static_cast<std::size_t>(static_cast<Key>(RT::encode(p[i])     - lo));
+            const std::size_t d1 = static_cast<std::size_t>(static_cast<Key>(RT::encode(p[i + 1]) - lo));
+            const std::size_t d2 = static_cast<std::size_t>(static_cast<Key>(RT::encode(p[i + 2]) - lo));
+            const std::size_t d3 = static_cast<std::size_t>(static_cast<Key>(RT::encode(p[i + 3]) - lo));
+            if (d0 >= span || d1 >= span || d2 >= span || d3 >= span) return false;
+            ++cnt[d0]; ++cnt[d1]; ++cnt[d2]; ++cnt[d3];
+        }
+        for (; i < n; ++i) {
+            const std::size_t d = static_cast<std::size_t>(static_cast<Key>(RT::encode(p[i]) - lo));
+            if (d >= span) return false;
+            ++cnt[d];
+        }
+
+        std::size_t out = 0;
+        if (!descending) {
+            for (std::size_t r = 0; r < span; ++r) {
+                if (!cnt[r]) continue;
+                std::fill_n(p + out, cnt[r], RT::decode(static_cast<Key>(lo + static_cast<Key>(r))));
+                out += cnt[r];
+            }
+        } else {
+            for (std::size_t rr = span; rr-- > 0;) {
+                if (!cnt[rr]) continue;
+                std::fill_n(p + out, cnt[rr], RT::decode(static_cast<Key>(lo + static_cast<Key>(rr))));
+                out += cnt[rr];
+            }
+        }
+        return out == n;
+    }
+}
+
 template <class T>
 inline bool try_integer_range_count_sort(T* p, std::size_t n, bool descending,
                                          const SampleWindow<T>* win = nullptr) {
@@ -1989,6 +2056,7 @@ inline bool try_integer_range_count_sort(T* p, std::size_t n, bool descending,
         if (n < kCountingMinN) return false;
         using RT  = RadixTraits<T>;
         using Key = typename RT::Key;
+        if (try_tiny_encoded_range_count(p, n, descending, win)) return true;
 
         // Same crossover as the parallel kernel: a handful of values spread
         // over a wide range belongs to the sparse counter, which finds them by
@@ -7136,6 +7204,7 @@ FYX_NOINLINE inline bool try_integer_range_count_sort_parallel(T* p, std::size_t
         if (n < kParallelThreshold || !parallel_available()) return false;
         using RT  = RadixTraits<T>;
         using Key = typename RT::Key;
+        if (try_tiny_encoded_range_count(p, n, descending, win)) return true;
         constexpr std::size_t MaxParallelRange = 65536;
 
         // The profile already read a strided sample for us when it is here;
@@ -7184,12 +7253,7 @@ FYX_NOINLINE inline bool try_integer_range_count_sort_parallel(T* p, std::size_t
             if (try_radix_key_sparse_count_sort_parallel(p, n, descending, dhat)) return true;
         }
 
-        const bool simd_rank_shape =
-            dhat <= 16
-#if FYX_HAS_AVX512_CODE
-            && use_avx512()
-#endif
-            ;
+        const bool simd_rank_shape = dhat <= 16;
         if (dhat <= 255 &&
             (simd_rank_shape ||
              (sample_range64 > 512ull &&
