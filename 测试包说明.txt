@@ -1,0 +1,18 @@
+本目录与 fyx_sort.hpp 放在一起的两个自测包：
+
+  fyx_linux_bench.zip     Linux（全算法）
+  fyx_win_mingw_bench.zip Windows / MinGW-w64
+
+Linux（Kali 4核8G 也按这个来）：
+  sudo apt install -y g++ cmake git libtbb-dev
+  unzip fyx_linux_bench.zip && cd fyx_linux_run && chmod +x build.sh run.sh && ./build.sh && ./run.sh
+  4 / 8 / 16 线程各跑一遍。编不上的对手打印「未编入」。
+  分支：arena/01a07a48-fyx-sort
+
+Windows：MinGW 很难稳定编 highway / TBB / 英特尔向量，包内是
+  fyx串行、fyx并行、标准库、模式击败。build.bat 已关 AVX-512（14700K 没有）。
+  全算法请用 Linux 包在 Linux 机器上跑。
+
+以后更新（指定分支，默认 arena/01a07a48-fyx-sort）：
+  ./update.sh
+  ./update.sh arena/01a07a48-fyx-sort
