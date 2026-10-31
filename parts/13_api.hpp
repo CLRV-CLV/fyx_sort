@@ -5794,9 +5794,6 @@ inline bool try_parallel_radix_high_prefix_sort(T* p, std::size_t n, bool descen
         return false;
     } else {
         using Key = typename RadixTraits<T>::Key;
-        if constexpr (sizeof(Key) >= 8) {
-            if (try_parallel_radix_chunk_merge(p, n, descending)) return true;
-        }
         if constexpr (sizeof(Key) != 8 && sizeof(Key) != 4) {
             (void)p; (void)n; (void)descending;
             return false;
@@ -6058,9 +6055,6 @@ inline bool try_parallel_radix_sort(T* p, std::size_t n, bool descending, bool a
         using RT  = RadixTraits<T>;
         using Key = typename RT::Key;
         constexpr unsigned Passes = RT::passes;
-        if constexpr (sizeof(Key) >= 8) {
-            if (try_parallel_radix_chunk_merge(p, n, descending)) return true;
-        }
         // Chunked parallel radix removes the old sort-halves-and-compare-merge
         // fallback for large high-entropy numeric inputs.
         {
